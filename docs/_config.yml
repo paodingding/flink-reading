@@ -90,3 +90,5 @@ host: 0.0.0.0
 
 kramdown:
   toc_levels: 1..3 # Include h1-h3 for ToC
+
+theme: jekyll-theme-cayman
