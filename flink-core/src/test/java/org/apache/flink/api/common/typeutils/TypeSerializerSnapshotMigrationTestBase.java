@@ -25,9 +25,7 @@ import org.apache.flink.core.memory.DataOutputSerializer;
 import org.apache.flink.testutils.migration.MigrationVersion;
 import org.apache.flink.util.TestLogger;
 
-import org.hamcrest.Description;
 import org.hamcrest.Matcher;
-import org.hamcrest.TypeSafeMatcher;
 import org.junit.Test;
 
 import java.io.IOException;
@@ -42,6 +40,7 @@ import java.util.LinkedList;
 import java.util.List;
 import java.util.function.Supplier;
 
+import static org.apache.flink.api.common.typeutils.TypeSerializerMatchers.hasSameCompatibilityAs;
 import static org.apache.flink.util.Preconditions.checkArgument;
 import static org.apache.flink.util.Preconditions.checkNotNull;
 import static org.hamcrest.CoreMatchers.allOf;
@@ -87,13 +86,21 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 		TypeSerializerSnapshot<ElementT> snapshot = snapshotUnderTest();
 		TypeSerializer<ElementT> serializer = snapshot.restoreSerializer();
 
-		DataInputView input = dataUnderTest();
+		assertSerializerIsAbleToReadOldData(serializer);
+	}
 
-		final Matcher<ElementT> matcher = testSpecification.testDataElementMatcher;
-		for (int i = 0; i < testSpecification.testDataCount; i++) {
-			final ElementT result = serializer.deserialize(input);
-			assertThat(result, matcher);
+	@Test
+	public void reconfiguredSerializerIsAbleToDeserializePreviousData() throws IOException {
+		TypeSerializerSnapshot<ElementT> snapshot = snapshotUnderTest();
+		TypeSerializerSchemaCompatibility<ElementT> compatibility = snapshot.resolveSchemaCompatibility(testSpecification.createSerializer());
+
+		if (!compatibility.isCompatibleWithReconfiguredSerializer()) {
+			// this test only applies for reconfigured serializers.
+			return;
 		}
+
+		TypeSerializer<ElementT> serializer = compatibility.getReconfiguredSerializer();
+		assertSerializerIsAbleToReadOldData(serializer);
 	}
 
 	@SuppressWarnings("deprecation")
@@ -111,6 +118,28 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 			notNullValue(),
 			not(instanceOf(TypeSerializerConfigSnapshot.class))
 		));
+	}
+
+	@Test
+	public void restoreSerializerFromNewSerializerSnapshotIsAbleToDeserializePreviousData() throws IOException {
+		TypeSerializer<ElementT> newSerializer = testSpecification.createSerializer();
+
+		TypeSerializerSchemaCompatibility<ElementT> compatibility =
+			snapshotUnderTest().resolveSchemaCompatibility(newSerializer);
+
+		final TypeSerializer<ElementT> nextSerializer;
+		if (compatibility.isCompatibleWithReconfiguredSerializer()) {
+			nextSerializer = compatibility.getReconfiguredSerializer();
+		} else if (compatibility.isCompatibleAsIs()) {
+			nextSerializer = newSerializer;
+		} else {
+			// this test does not apply.
+			return;
+		}
+
+		TypeSerializerSnapshot<ElementT> nextSnapshot = nextSerializer.snapshotConfiguration();
+
+		assertSerializerIsAbleToReadOldData(nextSnapshot.restoreSerializer());
 	}
 
 	// --------------------------------------------------------------------------------------------------------------
@@ -161,6 +190,16 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 		return contentsOf(testSpecification.getTestDataLocation());
 	}
 
+	private void assertSerializerIsAbleToReadOldData(TypeSerializer<ElementT> serializer) throws IOException {
+		DataInputView input = dataUnderTest();
+
+		final Matcher<ElementT> matcher = testSpecification.testDataElementMatcher;
+		for (int i = 0; i < testSpecification.testDataCount; i++) {
+			final ElementT result = serializer.deserialize(input);
+			assertThat(result, matcher);
+		}
+	}
+
 	// --------------------------------------------------------------------------------------------------------------
 	// Static Helpers
 	// --------------------------------------------------------------------------------------------------------------
@@ -197,6 +236,7 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 	/**
 	 * Test Specification.
 	 */
+	@SuppressWarnings("WeakerAccess")
 	public static final class TestSpecification<T> {
 		private final Class<? extends TypeSerializer<T>> serializerType;
 		private final Class<? extends TypeSerializerSnapshot<T>> snapshotClass;
@@ -245,7 +285,7 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 				Supplier<? extends TypeSerializer<T>> serializerProvider,
 				TypeSerializerSchemaCompatibility<T> expectedCompatibilityResult) {
 			this.serializerProvider = serializerProvider;
-			this.schemaCompatibilityMatcher = hasSameCompatibilityType(expectedCompatibilityResult);
+			this.schemaCompatibilityMatcher = hasSameCompatibilityAs(expectedCompatibilityResult);
 			return this;
 		}
 
@@ -268,6 +308,11 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 
 		public TestSpecification<T> withTestDataMatcher(Matcher<T> matcher) {
 			testDataElementMatcher = matcher;
+			return this;
+		}
+
+		public TestSpecification<T> withTestDataCount(int expectedDataItmes) {
+			this.testDataCount = expectedDataItmes;
 			return this;
 		}
 
@@ -296,6 +341,7 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 		public String toString() {
 			return String.format("%s , %s, %s", name, serializerType.getSimpleName(), snapshotClass.getSimpleName());
 		}
+
 	}
 
 	/**
@@ -476,33 +522,5 @@ public abstract class TypeSerializerSnapshotMigrationTestBase<ElementT> extends 
 	 */
 	protected interface TestResourceFilenameSupplier {
 		String get(MigrationVersion testVersion);
-	}
-
-	// --------------------------------------------------------------------------------------------------------------
-	// Utilities
-	// --------------------------------------------------------------------------------------------------------------
-
-	private static <T> Matcher<TypeSerializerSchemaCompatibility<T>> hasSameCompatibilityType(TypeSerializerSchemaCompatibility<T> expectedCompatibilty) {
-		return new TypeSafeMatcher<TypeSerializerSchemaCompatibility<T>>() {
-
-			@Override
-			protected boolean matchesSafely(TypeSerializerSchemaCompatibility<T> testResultCompatibility) {
-				if (expectedCompatibilty.isCompatibleAsIs()) {
-					return testResultCompatibility.isCompatibleAsIs();
-				} else if (expectedCompatibilty.isIncompatible()) {
-					return testResultCompatibility.isIncompatible();
-				} else if (expectedCompatibilty.isCompatibleAfterMigration()) {
-					return testResultCompatibility.isCompatibleAfterMigration();
-				} else if (expectedCompatibilty.isCompatibleWithReconfiguredSerializer()) {
-					return testResultCompatibility.isCompatibleWithReconfiguredSerializer();
-				}
-				return false;
-			}
-
-			@Override
-			public void describeTo(Description description) {
-				description.appendText("same compatibility as ").appendValue(expectedCompatibilty);
-			}
-		};
 	}
 }

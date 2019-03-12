@@ -22,8 +22,9 @@ import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.state.State;
 import org.apache.flink.api.common.state.StateDescriptor;
 import org.apache.flink.api.common.typeutils.base.StringSerializer;
+import org.apache.flink.core.fs.CloseableRegistry;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
-import org.apache.flink.runtime.checkpoint.StateObjectCollection;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
 import org.apache.flink.runtime.state.AbstractKeyedStateBackend;
@@ -37,11 +38,11 @@ import org.apache.flink.runtime.state.internal.InternalKvState;
 import org.apache.flink.util.Preconditions;
 
 import javax.annotation.Nonnull;
-import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.RunnableFuture;
 
@@ -77,17 +78,33 @@ public abstract class StateBackendTestContext {
 		}
 	}
 
-	void createAndRestoreKeyedStateBackend() {
-		createAndRestoreKeyedStateBackend(NUMBER_OF_KEY_GROUPS);
+	void createAndRestoreKeyedStateBackend(KeyedStateHandle snapshot) {
+		createAndRestoreKeyedStateBackend(NUMBER_OF_KEY_GROUPS, snapshot);
 	}
 
-	void createAndRestoreKeyedStateBackend(int numberOfKeyGroups) {
+	void createAndRestoreKeyedStateBackend(int numberOfKeyGroups, KeyedStateHandle snapshot) {
+		Collection<KeyedStateHandle> stateHandles;
+		if (snapshot == null) {
+			stateHandles = Collections.emptyList();
+		} else {
+			stateHandles = new ArrayList<>(1);
+			stateHandles.add(snapshot);
+		}
 		Environment env = new DummyEnvironment();
 		try {
 			disposeKeyedStateBackend();
 			keyedStateBackend = stateBackend.createKeyedStateBackend(
-				env, new JobID(), "test", StringSerializer.INSTANCE, numberOfKeyGroups,
-				new KeyGroupRange(0, numberOfKeyGroups - 1), env.getTaskKvStateRegistry(), timeProvider);
+				env,
+				new JobID(),
+				"test",
+				StringSerializer.INSTANCE,
+				numberOfKeyGroups,
+				new KeyGroupRange(0, numberOfKeyGroups - 1),
+				env.getTaskKvStateRegistry(),
+				timeProvider,
+				new UnregisteredMetricsGroup(),
+				stateHandles,
+				new CloseableRegistry());
 		} catch (Exception e) {
 			throw new RuntimeException("unexpected", e);
 		}
@@ -127,17 +144,6 @@ public abstract class StateBackendTestContext {
 			snapshotRunnableFuture.run();
 		}
 		return snapshotRunnableFuture;
-	}
-
-	void restoreSnapshot(@Nullable KeyedStateHandle snapshot) throws Exception {
-		Collection<KeyedStateHandle> snapshots = new ArrayList<>();
-		snapshots.add(snapshot);
-		Collection<KeyedStateHandle> restoreState =
-			snapshot == null ? null : new StateObjectCollection<>(snapshots);
-		keyedStateBackend.restore(restoreState);
-		if (snapshot != null) {
-			snapshots.add(snapshot);
-		}
 	}
 
 	public void setCurrentKey(String key) {

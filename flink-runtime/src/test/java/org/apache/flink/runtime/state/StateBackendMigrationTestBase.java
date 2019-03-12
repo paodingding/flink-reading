@@ -28,12 +28,15 @@ import org.apache.flink.api.common.typeutils.TypeSerializer;
 import org.apache.flink.api.common.typeutils.TypeSerializerSchemaCompatibility;
 import org.apache.flink.api.common.typeutils.TypeSerializerSnapshot;
 import org.apache.flink.api.common.typeutils.base.IntSerializer;
+import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.core.memory.DataInputView;
 import org.apache.flink.core.memory.DataOutputView;
+import org.apache.flink.metrics.groups.UnregisteredMetricsGroup;
 import org.apache.flink.runtime.checkpoint.CheckpointOptions;
 import org.apache.flink.runtime.checkpoint.StateObjectCollection;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.operators.testutils.DummyEnvironment;
+import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 import org.apache.flink.runtime.testutils.statemigration.TestType;
 import org.apache.flink.util.ExceptionUtils;
 import org.apache.flink.util.StateMigrationException;
@@ -45,6 +48,7 @@ import org.junit.Test;
 import org.junit.rules.TemporaryFolder;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
@@ -998,8 +1002,11 @@ public abstract class StateBackendMigrationTestBase<B extends AbstractStateBacke
 			keySerializer,
 			numberOfKeyGroups,
 			keyGroupRange,
-			env.getTaskKvStateRegistry());
-		backend.restore(null);
+			env.getTaskKvStateRegistry(),
+			TtlTimeProvider.DEFAULT,
+			new UnregisteredMetricsGroup(),
+			Collections.emptyList(),
+			new CloseableRegistry());
 		return backend;
 	}
 
@@ -1032,8 +1039,11 @@ public abstract class StateBackendMigrationTestBase<B extends AbstractStateBacke
 			keySerializer,
 			numberOfKeyGroups,
 			keyGroupRange,
-			env.getTaskKvStateRegistry());
-		backend.restore(new StateObjectCollection<>(state));
+			env.getTaskKvStateRegistry(),
+			TtlTimeProvider.DEFAULT,
+			new UnregisteredMetricsGroup(),
+			state,
+			new CloseableRegistry());
 		return backend;
 	}
 
@@ -1058,12 +1068,17 @@ public abstract class StateBackendMigrationTestBase<B extends AbstractStateBacke
 	// -------------------------------------------------------------------------------
 
 	private OperatorStateBackend createOperatorStateBackend() throws Exception {
-		return getStateBackend().createOperatorStateBackend(new DummyEnvironment(), "test_op");
+		return getStateBackend().createOperatorStateBackend(
+			new DummyEnvironment(), "test_op", Collections.emptyList(), new CloseableRegistry());
+	}
+
+	private OperatorStateBackend createOperatorStateBackend(Collection<OperatorStateHandle> state) throws Exception {
+		return getStateBackend().createOperatorStateBackend(
+			new DummyEnvironment(), "test_op", state, new CloseableRegistry());
 	}
 
 	private OperatorStateBackend restoreOperatorStateBackend(OperatorStateHandle state) throws Exception {
-		OperatorStateBackend operatorStateBackend = createOperatorStateBackend();
-		operatorStateBackend.restore(StateObjectCollection.singleton(state));
+		OperatorStateBackend operatorStateBackend = createOperatorStateBackend(StateObjectCollection.singleton(state));
 		return operatorStateBackend;
 	}
 

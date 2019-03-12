@@ -183,6 +183,38 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId> impleme
 	//------------------------------------------------------
 
 	@Override
+	public void onStart() throws Exception {
+		try {
+			startDispatcherServices();
+		} catch (Exception e) {
+			final DispatcherException exception = new DispatcherException(String.format("Could not start the Dispatcher %s", getAddress()), e);
+			onFatalError(exception);
+			throw exception;
+		}
+	}
+
+	private void startDispatcherServices() throws Exception {
+		try {
+			submittedJobGraphStore.start(this);
+			leaderElectionService.start(this);
+
+			registerDispatcherMetrics(jobManagerMetricGroup);
+		} catch (Exception e) {
+			handleStartDispatcherServicesException(e);
+		}
+	}
+
+	private void handleStartDispatcherServicesException(Exception e) throws Exception {
+		try {
+			stopDispatcherServices();
+		} catch (Exception exception) {
+			e.addSuppressed(exception);
+		}
+
+		throw e;
+	}
+
+	@Override
 	public CompletableFuture<Void> onStop() {
 		log.info("Stopping dispatcher {}.", getAddress());
 
@@ -191,43 +223,35 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId> impleme
 		return FutureUtils.runAfterwards(
 			allJobManagerRunnersTerminationFuture,
 			() -> {
-				Exception exception = null;
-				try {
-					jobManagerSharedServices.shutdown();
-				} catch (Exception e) {
-					exception = ExceptionUtils.firstOrSuppressed(e, exception);
-				}
+				stopDispatcherServices();
 
-				try {
-					submittedJobGraphStore.stop();
-				} catch (Exception e) {
-					exception = ExceptionUtils.firstOrSuppressed(e, exception);
-				}
-
-				try {
-					leaderElectionService.stop();
-				} catch (Exception e) {
-					exception = ExceptionUtils.firstOrSuppressed(e, exception);
-				}
-
-				jobManagerMetricGroup.close();
-
-				if (exception != null) {
-					throw exception;
-				} else {
-					log.info("Stopped dispatcher {}.", getAddress());
-				}
+				log.info("Stopped dispatcher {}.", getAddress());
 			});
 	}
 
-	@Override
-	public void start() throws Exception {
-		super.start();
+	private void stopDispatcherServices() throws Exception {
+		Exception exception = null;
+		try {
+			jobManagerSharedServices.shutdown();
+		} catch (Exception e) {
+			exception = ExceptionUtils.firstOrSuppressed(e, exception);
+		}
 
-		submittedJobGraphStore.start(this);
-		leaderElectionService.start(this);
+		try {
+			submittedJobGraphStore.stop();
+		} catch (Exception e) {
+			exception = ExceptionUtils.firstOrSuppressed(e, exception);
+		}
 
-		registerDispatcherMetrics(jobManagerMetricGroup);
+		try {
+			leaderElectionService.stop();
+		} catch (Exception e) {
+			exception = ExceptionUtils.firstOrSuppressed(e, exception);
+		}
+
+		jobManagerMetricGroup.close();
+
+		ExceptionUtils.tryRethrowException(exception);
 	}
 
 	//------------------------------------------------------
@@ -236,40 +260,57 @@ public abstract class Dispatcher extends FencedRpcEndpoint<DispatcherId> impleme
 
 	@Override
 	public CompletableFuture<Acknowledge> submitJob(JobGraph jobGraph, Time timeout) {
-		return internalSubmitJob(jobGraph).whenCompleteAsync((acknowledge, throwable) -> {
-			if (throwable != null) {
-				cleanUpJobData(jobGraph.getJobID(), true);
+		log.info("Received JobGraph submission {} ({}).", jobGraph.getJobID(), jobGraph.getName());
+
+		try {
+			if (isDuplicateJob(jobGraph.getJobID())) {
+				return FutureUtils.completedExceptionally(
+					new JobSubmissionException(jobGraph.getJobID(), "Job has already been submitted."));
+			} else {
+				return internalSubmitJob(jobGraph);
 			}
-		}, getRpcService().getExecutor());
+		} catch (FlinkException e) {
+			return FutureUtils.completedExceptionally(e);
+		}
 	}
 
-	private CompletableFuture<Acknowledge> internalSubmitJob(JobGraph jobGraph) {
-		final JobID jobId = jobGraph.getJobID();
-
-		log.info("Submitting job {} ({}).", jobId, jobGraph.getName());
+	/**
+	 * Checks whether the given job has already been submitted or executed.
+	 *
+	 * @param jobId identifying the submitted job
+	 * @return true if the job has already been submitted (is running) or has been executed
+	 * @throws FlinkException if the job scheduling status cannot be retrieved
+	 */
+	private boolean isDuplicateJob(JobID jobId) throws FlinkException {
 		final RunningJobsRegistry.JobSchedulingStatus jobSchedulingStatus;
 
 		try {
 			jobSchedulingStatus = runningJobsRegistry.getJobSchedulingStatus(jobId);
 		} catch (IOException e) {
-			return FutureUtils.completedExceptionally(new FlinkException(String.format("Failed to retrieve job scheduling status for job %s.", jobId), e));
+			throw new FlinkException(String.format("Failed to retrieve job scheduling status for job %s.", jobId), e);
 		}
 
-		if (jobSchedulingStatus == RunningJobsRegistry.JobSchedulingStatus.DONE || jobManagerRunnerFutures.containsKey(jobId)) {
-			return FutureUtils.completedExceptionally(
-				new JobSubmissionException(jobId, String.format("Job has already been submitted and is in state %s.", jobSchedulingStatus)));
-		} else {
-			final CompletableFuture<Acknowledge> persistAndRunFuture = waitForTerminatingJobManager(jobId, jobGraph, this::persistAndRunJob)
-				.thenApply(ignored -> Acknowledge.get());
+		return jobSchedulingStatus == RunningJobsRegistry.JobSchedulingStatus.DONE || jobManagerRunnerFutures.containsKey(jobId);
+	}
 
-			return persistAndRunFuture.exceptionally(
-				(Throwable throwable) -> {
-					final Throwable strippedThrowable = ExceptionUtils.stripCompletionException(throwable);
-					log.error("Failed to submit job {}.", jobId, strippedThrowable);
-					throw new CompletionException(
-						new JobSubmissionException(jobId, "Failed to submit job.", strippedThrowable));
-				});
-		}
+	private CompletableFuture<Acknowledge> internalSubmitJob(JobGraph jobGraph) {
+		log.info("Submitting job {} ({}).", jobGraph.getJobID(), jobGraph.getName());
+
+		final CompletableFuture<Acknowledge> persistAndRunFuture = waitForTerminatingJobManager(jobGraph.getJobID(), jobGraph, this::persistAndRunJob)
+			.thenApply(ignored -> Acknowledge.get());
+
+		return persistAndRunFuture.handleAsync((acknowledge, throwable) -> {
+			if (throwable != null) {
+				cleanUpJobData(jobGraph.getJobID(), true);
+
+				final Throwable strippedThrowable = ExceptionUtils.stripCompletionException(throwable);
+				log.error("Failed to submit job {}.", jobGraph.getJobID(), strippedThrowable);
+				throw new CompletionException(
+					new JobSubmissionException(jobGraph.getJobID(), "Failed to submit job.", strippedThrowable));
+			} else {
+				return acknowledge;
+			}
+		}, getRpcService().getExecutor());
 	}
 
 	private CompletableFuture<Void> persistAndRunJob(JobGraph jobGraph) throws Exception {

@@ -47,6 +47,7 @@ import org.apache.flink.runtime.jobgraph.JobVertex;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
 import org.apache.flink.runtime.jobgraph.tasks.AbstractInvokable;
 import org.apache.flink.runtime.jobmanager.slots.TaskManagerGateway;
+import org.apache.flink.runtime.jobmaster.LogicalSlot;
 import org.apache.flink.runtime.jobmaster.SlotOwner;
 import org.apache.flink.runtime.jobmaster.slotpool.SlotProvider;
 import org.apache.flink.runtime.messages.Acknowledge;
@@ -56,6 +57,7 @@ import org.apache.flink.runtime.messages.TaskMessages.SubmitTask;
 import org.apache.flink.runtime.taskmanager.TaskManagerLocation;
 import org.apache.flink.runtime.testingUtils.TestingUtils;
 import org.apache.flink.runtime.testtasks.NoOpInvokable;
+import org.apache.flink.runtime.testutils.DirectScheduledExecutorService;
 import org.apache.flink.util.SerializedValue;
 
 import org.slf4j.Logger;
@@ -337,7 +339,7 @@ public class ExecutionGraphTestUtils {
 		}
 	}
 	
-	public static void setVertexResource(ExecutionVertex vertex, SimpleSlot slot) {
+	public static void setVertexResource(ExecutionVertex vertex, LogicalSlot slot) {
 		Execution exec = vertex.getCurrentExecutionAttempt();
 
 		if(!exec.tryAssignResource(slot)) {
@@ -518,27 +520,6 @@ public class ExecutionGraphTestUtils {
 		}
 	}
 
-	@SuppressWarnings("serial")
-	public static class SimpleFailingActorGateway extends BaseTestingActorGateway {
-
-		public SimpleFailingActorGateway(ExecutionContext executionContext) {
-			super(executionContext);
-		}
-
-		@Override
-		public Object handleMessage(Object message) throws Exception {
-			if(message instanceof SubmitTask) {
-				throw new Exception(ERROR_MESSAGE);
-			} else if (message instanceof CancelTask) {
-				CancelTask cancelTask = (CancelTask) message;
-
-				return Acknowledge.get();
-			} else {
-				return null;
-			}
-		}
-	}
-
 	public static final String ERROR_MESSAGE = "test_failure_error_message";
 
 	public static ExecutionJobVertex getExecutionVertex(
@@ -565,7 +546,7 @@ public class ExecutionGraphTestUtils {
 	}
 	
 	public static ExecutionJobVertex getExecutionVertex(JobVertexID id) throws Exception {
-		return getExecutionVertex(id, TestingUtils.defaultExecutor());
+		return getExecutionVertex(id, new DirectScheduledExecutorService());
 	}
 
 	// ------------------------------------------------------------------------

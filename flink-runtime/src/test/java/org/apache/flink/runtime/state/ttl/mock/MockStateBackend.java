@@ -20,6 +20,7 @@ package org.apache.flink.runtime.state.ttl.mock;
 
 import org.apache.flink.api.common.JobID;
 import org.apache.flink.api.common.typeutils.TypeSerializer;
+import org.apache.flink.core.fs.CloseableRegistry;
 import org.apache.flink.metrics.MetricGroup;
 import org.apache.flink.runtime.execution.Environment;
 import org.apache.flink.runtime.jobgraph.JobVertexID;
@@ -34,11 +35,16 @@ import org.apache.flink.runtime.state.CheckpointStorageLocationReference;
 import org.apache.flink.runtime.state.CheckpointStreamFactory;
 import org.apache.flink.runtime.state.CheckpointedStateScope;
 import org.apache.flink.runtime.state.CompletedCheckpointStorageLocation;
+import org.apache.flink.runtime.state.KeyedStateHandle;
 import org.apache.flink.runtime.state.KeyGroupRange;
 import org.apache.flink.runtime.state.OperatorStateBackend;
+import org.apache.flink.runtime.state.OperatorStateHandle;
 import org.apache.flink.runtime.state.ttl.TtlTimeProvider;
 
+import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
+
+import java.util.Collection;
 
 /** mack state backend. */
 public class MockStateBackend extends AbstractStateBackend {
@@ -120,8 +126,10 @@ public class MockStateBackend extends AbstractStateBackend {
 		KeyGroupRange keyGroupRange,
 		TaskKvStateRegistry kvStateRegistry,
 		TtlTimeProvider ttlTimeProvider,
-		MetricGroup metricGroup) {
-		return new MockKeyedStateBackend<>(
+		MetricGroup metricGroup,
+		@Nonnull Collection<KeyedStateHandle> stateHandles,
+		CloseableRegistry cancelStreamRegistry) {
+		return new MockKeyedStateBackendBuilder<>(
 			new KvStateRegistry().createTaskRegistry(jobID, new JobVertexID()),
 			keySerializer,
 			env.getUserClassLoader(),
@@ -129,11 +137,17 @@ public class MockStateBackend extends AbstractStateBackend {
 			keyGroupRange,
 			env.getExecutionConfig(),
 			ttlTimeProvider,
-			metricGroup);
+			stateHandles,
+			AbstractStateBackend.getCompressionDecorator(env.getExecutionConfig()),
+			cancelStreamRegistry).build();
 	}
 
 	@Override
-	public OperatorStateBackend createOperatorStateBackend(Environment env, String operatorIdentifier) {
+	public OperatorStateBackend createOperatorStateBackend(
+		Environment env,
+		String operatorIdentifier,
+		@Nonnull Collection<OperatorStateHandle> stateHandles,
+		CloseableRegistry cancelStreamRegistry) {
 		throw new UnsupportedOperationException();
 	}
 }
